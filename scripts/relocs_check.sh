@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 # Get a list of all the relocations, remove from it the relocations
