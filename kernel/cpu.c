@@ -172,9 +172,10 @@ static int cpuhp_invoke_callback(unsigned int cpu, enum cpuhp_state state,
 {
 	struct cpuhp_cpu_state *st = per_cpu_ptr(&cpuhp_state, cpu);
 	struct cpuhp_step *step = cpuhp_get_step(state);
-	int (*cbm)(unsigned int cpu, struct hlist_node *node);
-	int (*cb)(unsigned int cpu);
-	int ret, cnt;
+	int (*cbm)(unsigned int, struct hlist_node *);
+	int (*cb)(unsigned int);
+	int ret = 0;
+	int count = 0;
 
 	if (st->fail == state) {
 		st->fail = CPUHP_INVALID;
@@ -188,63 +189,66 @@ static int cpuhp_invoke_callback(unsigned int cpu, enum cpuhp_state state,
 
 	if (!step->multi_instance) {
 		WARN_ON_ONCE(lastp && *lastp);
+
 		cb = bringup ? step->startup.single : step->teardown.single;
 
 		trace_cpuhp_enter(cpu, st->target, state, cb);
 		ret = cb(cpu);
-		trace_cpuhp_exit(cpu, st->state, state, ret);
+		trace_cpuhp_exit(cpu, st->state, state, cb);
 		return ret;
 	}
+
 	cbm = bringup ? step->startup.multi : step->teardown.multi;
 
-	/* Single invocation for instance add/remove */
 	if (node) {
 		WARN_ON_ONCE(lastp && *lastp);
+
 		trace_cpuhp_multi_enter(cpu, st->target, state, cbm, node);
 		ret = cbm(cpu, node);
 		trace_cpuhp_exit(cpu, st->state, state, ret);
 		return ret;
 	}
 
-	/* State transition. Invoke on all instances */
-	cnt = 0;
 	hlist_for_each(node, &step->list) {
 		if (lastp && node == *lastp)
 			break;
 
 		trace_cpuhp_multi_enter(cpu, st->target, state, cbm, node);
-		ret = cbm(cpu, node);
-		trace_cpuhp_exit(cpu, st->state, state, ret);
-		if (ret) {
-			if (!lastp)
-				goto err;
 
-			*lastp = node;
+		if (ret) {
+			if (lastp)
+				*lastp = node;
+			else
+				goto rollback;
 			return ret;
 		}
-		cnt++;
+		count++;
 	}
+
 	if (lastp)
 		*lastp = NULL;
+
 	return 0;
-err:
-	/* Rollback the instances if one failed */
-	cbm = !bringup ? step->startup.multi : step->teardown.multi;
+
+rollback:
+	cbm = bringup ? step->teardown.multi : step->startup.multi;
+
 	if (!cbm)
 		return ret;
 
 	hlist_for_each(node, &step->list) {
-		if (!cnt--)
+		if (!count--)
 			break;
 
 		trace_cpuhp_multi_enter(cpu, st->target, state, cbm, node);
 		ret = cbm(cpu, node);
 		trace_cpuhp_exit(cpu, st->state, state, ret);
-		/*
-		 * Rollback must not fail,
-		 */
+
+		WARN_ON_ONCE(cpu, st->state, state, ret);
+
 		WARN_ON_ONCE(ret);
 	}
+
 	return ret;
 }
 
