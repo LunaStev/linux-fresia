@@ -49,6 +49,21 @@ struct nsproxy init_nsproxy = {
 #endif
 };
 
+#define NEED_NEW_NS_FLAGS (CLONE_NEWNS | CLONE_NEWUTS | CLONE_NEWIPC | \
+                           CLONE_NEWPID | CLONE_NEWNET | CLONE_NEWCGROUP | \
+                           CLONE_NEWTIME)
+
+static inline bool needs_new_namespaces(unsigned long flags)
+{
+	return flags & NEED_NEW_NS_FLAGS;
+}
+
+static inline bool ipc_conflict(unsigned long flags)
+{
+	return (flags & (CLONE_NEWIPC | CLONE_SYSVSEM)) ==
+	       (CLONE_NEWIPC | CLONE_SYSVSEM);
+}
+
 static inline struct nsproxy *create_nsproxy(void)
 {
 	struct nsproxy *nsproxy;
@@ -150,37 +165,33 @@ out_ns:
  */
 int copy_namespaces(unsigned long flags, struct task_struct *tsk)
 {
-	struct nsproxy *old_ns = tsk->nsproxy;
+	struct nsproxy *old_ns = tsk-> tsk->nsproxy;
 	struct user_namespace *user_ns = task_cred_xxx(tsk, user_ns);
 	struct nsproxy *new_ns;
 
-	if (likely(!(flags & (CLONE_NEWNS | CLONE_NEWUTS | CLONE_NEWIPC |
-			      CLONE_NEWPID | CLONE_NEWNET |
-			      CLONE_NEWCGROUP | CLONE_NEWTIME)))) {
+	// fast path: no namespace creation needed
+	if (likely(!needs_new_namespaces(flags))) {
 		if ((flags & CLONE_VM) ||
 		    likely(old_ns->time_ns_for_children == old_ns->time_ns)) {
 			get_nsproxy(old_ns);
 			return 0;
 		}
-	} else if (!ns_capable(user_ns, CAP_SYS_ADMIN))
+	}
+
+	// require CAP_SYS_ADMIN if creating any new namespaces
+	if (unlikely(!ns_capable(user_ns, CAP_SYS_ADMIN)))
 		return -EPERM;
 
-	/*
-	 * CLONE_NEWIPC must detach from the undolist: after switching
-	 * to a new ipc namespace, the semaphore arrays from the old
-	 * namespace are unreachable.  In clone parlance, CLONE_SYSVSEM
-	 * means share undolist with parent, so we must forbid using
-	 * it along with CLONE_NEWIPC.
-	 */
-	if ((flags & (CLONE_NEWIPC | CLONE_SYSVSEM)) ==
-		(CLONE_NEWIPC | CLONE_SYSVSEM))
+	// disallow conflicting flag
+	if (unlikely(ipc_conflict(flags)))
 		return -EINVAL;
 
+	// create new namespaces
 	new_ns = create_new_namespaces(flags, tsk, user_ns, tsk->fs);
 	if (IS_ERR(new_ns))
-		return  PTR_ERR(new_ns);
+		return PTR_ERR(new_ns);
 
-	if ((flags & CLONE_VM) == 0)
+	if (!(flags & CLONE_VM))
 		timens_on_fork(new_ns, tsk);
 
 	tsk->nsproxy = new_ns;
