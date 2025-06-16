@@ -2287,26 +2287,29 @@ static int cpuhp_cb_check(enum cpuhp_state state)
  */
 static int cpuhp_reserve_state(enum cpuhp_state state)
 {
-	enum cpuhp_state i, end;
-	struct cpuhp_step *step;
-
+	struct cpuhp_step *states;
+	enum cpuhp_state i, start, end;
+	
 	switch (state) {
 	case CPUHP_AP_ONLINE_DYN:
-		step = cpuhp_hp_states + CPUHP_AP_ONLINE_DYN;
+		start = CPUHP_AP_ONLINE_DYN;
 		end = CPUHP_AP_ONLINE_DYN_END;
 		break;
 	case CPUHP_BP_PREPARE_DYN:
-		step = cpuhp_hp_states + CPUHP_BP_PREPARE_DYN;
+		start = CPUHP_BP_PREPARE_DYN;
 		end = CPUHP_BP_PREPARE_DYN_END;
 		break;
 	default:
 		return -EINVAL;
 	}
 
-	for (i = state; i <= end; i++, step++) {
-		if (!step->name)
+	states = cpuhp_hp_states;
+
+	for (i = start; i <= end; i++) {
+		if (!states[i].name)
 			return i;
 	}
+
 	WARN(1, "No more dynamic states available for CPU hotplug\n");
 	return -ENOSPC;
 }

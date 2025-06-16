@@ -20,6 +20,9 @@
 #include <trace/events/power.h>
 #include <linux/cpuset.h>
 
+#define FREEZE_SLEEP_MIN_USEC 1000
+#define FREEZE_SLEEP_MAX_USEC 8000
+
 /*
  * Timeout for stopping processes
  */
@@ -28,40 +31,41 @@ unsigned int __read_mostly freeze_timeout_msecs = 20 * MSEC_PER_SEC;
 static int try_to_freeze_tasks(bool user_only)
 {
 	const char *what = user_only ? "user space processes" :
-					"remaining freezable tasks";
+				       "remaining freezable tasks";
 	struct task_struct *g, *p;
 	unsigned long end_time;
-	unsigned int todo;
+	unsigned int todo = 0, todo_tasks = 0, todo_wq = 0;
 	bool wq_busy = false;
 	ktime_t start, end, elapsed;
 	unsigned int elapsed_msecs;
 	bool wakeup = false;
-	int sleep_usecs = USEC_PER_MSEC;
+	int sleep_usecs = FREEZE_SLEEP_MIN_USEC;
 
 	pr_info("Freezing %s\n", what);
 
 	start = ktime_get_boottime();
-
 	end_time = jiffies + msecs_to_jiffies(freeze_timeout_msecs);
 
 	if (!user_only)
 		freeze_workqueues_begin();
 
 	while (true) {
-		todo = 0;
+		todo_tasks = 0;
+
 		read_lock(&tasklist_lock);
 		for_each_process_thread(g, p) {
-			if (p == current || !freeze_task(p))
-				continue;
-
-			todo++;
+			if (p != current && freeze_task(p))
+				todo_tasks++;
 		}
 		read_unlock(&tasklist_lock);
 
+		todo_wq = 0;
 		if (!user_only) {
 			wq_busy = freeze_workqueues_busy();
-			todo += wq_busy;
+			todo_wq = wq_busy;
 		}
+
+		todo = todo_tasks + todo_wq;
 
 		if (!todo || time_after(jiffies, end_time))
 			break;
@@ -71,13 +75,8 @@ static int try_to_freeze_tasks(bool user_only)
 			break;
 		}
 
-		/*
-		 * We need to retry, but first give the freezing tasks some
-		 * time to enter the refrigerator.  Start with an initial
-		 * 1 ms sleep followed by exponential backoff until 8 ms.
-		 */
 		usleep_range(sleep_usecs / 2, sleep_usecs);
-		if (sleep_usecs < 8 * USEC_PER_MSEC)
+		if (sleep_usecs < FREEZE_SLEEP_MAX_USEC)
 			sleep_usecs *= 2;
 	}
 
@@ -90,9 +89,9 @@ static int try_to_freeze_tasks(bool user_only)
 		       "(%d tasks refusing to freeze, wq_busy=%d):\n", what,
 		       wakeup ? "aborted" : "failed",
 		       elapsed_msecs / 1000, elapsed_msecs % 1000,
-		       todo - wq_busy, wq_busy);
+		       todo_tasks, todo_wq);
 
-		if (wq_busy)
+		if (todo_wq)
 			show_freezable_workqueues();
 
 		if (!wakeup || pm_debug_messages_on) {
